@@ -99,8 +99,6 @@ import logging
 logger = logging.getLogger(__name__)
 logger.info(f"RAG Configuration - Enabled: {settings.RAG_ENABLED}")
 logger.info(f"GEMINI_API_KEY loaded: {bool(settings.GEMINI_API_KEY)}")
-if settings.GEMINI_API_KEY:
-    logger.info(f"GEMINI_API_KEY (first 20 chars): {settings.GEMINI_API_KEY[:20]}")
 if settings.RAG_ENABLED:
     logger.info(f"RAG Provider: {settings.RAG_MODEL_PROVIDER}")
     logger.info(f"RAG Vector DB: {settings.RAG_VECTOR_DB}")

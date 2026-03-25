@@ -5,9 +5,14 @@ import os
 import sys
 from pathlib import Path
 
-# Change to project root directory
-project_root = Path(__file__).parent.parent
-os.chdir(project_root)
+# Ensure imports work from both `backend/app` and repo-root `rag_system/`.
+backend_dir = Path(__file__).parent.resolve()
+repo_root = backend_dir.parent.resolve()
+sys.path.insert(0, str(backend_dir))
+sys.path.insert(0, str(repo_root))
+
+# Run from backend directory so `import app...` works reliably.
+os.chdir(backend_dir)
 print(f"Changed working directory to: {os.getcwd()}")
 
 import uvicorn

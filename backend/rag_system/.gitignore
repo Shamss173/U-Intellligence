@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+.env.*
+.env
+
+# Credentials / secrets
+service_account.json
+*service_account*.json
+credentials*.json
+*credential*.json
+*.pem
+*.key
+
+# RAG runtime artifacts
+bank_rag.index
+chunks_metadata.pkl
+ingestion_state.json
+run_commands.txt
+
+# Vector DB / embeddings / local databases (do not commit)
+database/
+databases/
+db/
+*.db
+*.sqlite
+*.sqlite3
+*.faiss
+*.index
+*.pkl
+*.npy
+*.npz
+embeddings/
+vectorstore/
+vectorstores/
+chroma/
+chromadb/
+
+# Local sanity-check artifacts
+tmp_excel/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Internal folders
+HR/
+Operations & Transformation/

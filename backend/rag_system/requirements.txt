@@ -1,0 +1,10 @@
+google-genai
+faiss-cpu
+pdfplumber
+python-docx
+nltk
+sentence-transformers
+numpy
+python-dotenv
+openpyxl
+xlrd

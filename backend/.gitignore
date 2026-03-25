@@ -36,6 +36,7 @@ env/
 # Uploads
 uploads/
 department_storage/
+my_vector_db_v2/
 
 # IDE
 .vscode/

@@ -53,8 +53,9 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info("RAG Service Initialization Details:")
     logger.info(f"  - RAG Enabled: {rag_service.enabled}")
-    logger.info(f"  - Chroma Client: {rag_service.client is not None}")
-    logger.info(f"  - Gemini Client: {rag_service.gemini_client is not None}")
+    # Adapter keeps these attributes for compatibility, but they are no longer used.
+    logger.info(f"  - Legacy Client: {rag_service.client is not None}")
+    logger.info(f"  - Legacy Gemini: {rag_service.gemini_client is not None}")
     logger.info("=" * 60)
 
 # Include routers
