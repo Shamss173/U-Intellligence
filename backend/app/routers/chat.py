@@ -1,7 +1,7 @@
 """
 Chat router
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.models.conversation import Conversation, Message
 from app.services.rag_service import rag_service
 from app.services.title_generator import TitleGenerator
+from app.main import limiter
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,45 +38,46 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/", response_model=ChatResponse)
-async def chat(request: ChatRequest, db: Session = Depends(get_db)):
+@limiter.limit("30/minute")
+async def chat(request: Request, chat_request: ChatRequest, db: Session = Depends(get_db)):
     """
     Handle chat messages with RAG integration
     """
     try:
         # Get or create conversation
-        if request.conversation_id:
+        if chat_request.conversation_id:
             conversation = db.query(Conversation).filter(
-                Conversation.id == request.conversation_id
+                Conversation.id == chat_request.conversation_id
             ).first()
             if not conversation:
                 raise HTTPException(status_code=404, detail="Conversation not found")
         else:
             # Create new conversation
             conversation = Conversation(
-                department_id=request.department_id,
-                memory_enabled=request.memory_enabled
+                department_id=chat_request.department_id,
+                memory_enabled=chat_request.memory_enabled
             )
             db.add(conversation)
             db.flush()  # Get the ID
         
         # Update memory setting if changed
-        conversation.memory_enabled = request.memory_enabled
+        conversation.memory_enabled = chat_request.memory_enabled
         
         # Save user message
         user_message = Message(
             conversation_id=conversation.id,
             role="user",
-            content=request.message
+            content=chat_request.message
         )
         db.add(user_message)
         
         # Generate title if this is the first message
         if not conversation.title:
-            conversation.title = TitleGenerator.generate_title(request.message)
+            conversation.title = TitleGenerator.generate_title(chat_request.message)
         
         # Get conversation context if memory is enabled
         context = None
-        if request.memory_enabled:
+        if chat_request.memory_enabled:
             previous_messages = db.query(Message).filter(
                 Message.conversation_id == conversation.id
             ).order_by(Message.timestamp.asc()).all()
@@ -85,10 +87,10 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             ]
         
         # Query RAG service for response
-        logger.debug(f"Calling RAG service for department: {request.department_id}")
+        logger.debug(f"Calling RAG service for department: {chat_request.department_id}")
         assistant_response = await rag_service.query(
-            department_id=request.department_id,
-            query=request.message,
+            department_id=chat_request.department_id,
+            query=chat_request.message,
             context=context
         )
         

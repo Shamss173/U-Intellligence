@@ -1,7 +1,7 @@
 """
 File upload router
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -12,6 +12,7 @@ import aiofiles
 import logging
 from pathlib import Path
 from datetime import datetime
+from app.main import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,9 @@ router = APIRouter()
 
 
 @router.post("/{department_id}")
+@limiter.limit("10/minute")
 async def upload_file(
+    request: Request,
     department_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db)

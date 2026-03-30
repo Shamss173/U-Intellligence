@@ -4,6 +4,8 @@ import { ArrowLeft, Send, Upload, MessageSquare, Trash2, Clock, X, Menu, Brain, 
 import { sendMessage, getConversations, getConversationDetail, deleteConversation, toggleMemory, uploadFile, getDepartment } from '../services/api'
 import { formatDistanceToNow, format, isToday, isYesterday, isThisWeek, isThisMonth } from 'date-fns'
 import { useTheme } from '../contexts/ThemeContext'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import './ChatInterface.css'
 
 const ChatInterface = () => {
@@ -87,9 +89,9 @@ const ChatInterface = () => {
       setDepartment(dept)
     } catch (error) {
       console.error('Error loading department:', error)
-      setDepartment({ 
-        code: departmentCode, 
-        name: departmentCode.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) 
+      setDepartment({
+        code: departmentCode,
+        name: departmentCode.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
       })
     }
   }
@@ -243,7 +245,7 @@ const ChatInterface = () => {
     } else {
       setMemoryEnabled(newMemoryState)
     }
-    
+
     setMemoryToggling(false)
   }
 
@@ -293,7 +295,7 @@ const ChatInterface = () => {
   return (
     <div className="chat-interface">
       {/* Enhanced Sidebar with Slide Animation */}
-      <div 
+      <div
         ref={sidebarRef}
         className={`chat-sidebar ${sidebarOpen ? 'open' : 'closed'}`}
       >
@@ -501,7 +503,16 @@ const ChatInterface = () => {
                   style={{ animationDelay: `${index * 0.05}s` }}
                 >
                   <div className="message-content">
-                    <p>{msg.content}</p>
+                    {msg.role === 'assistant' ? (
+                      <div
+                        className="markdown-content"
+                        dangerouslySetInnerHTML={{
+                          __html: DOMPurify.sanitize(marked.parse(msg.content || ''))
+                        }}
+                      />
+                    ) : (
+                      <p>{msg.content}</p>
+                    )}
                     <span className="message-timestamp">
                       {(() => {
                         const msgDate = new Date(msg.timestamp + (msg.timestamp.includes('Z') ? '' : 'Z'))

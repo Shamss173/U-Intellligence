@@ -106,20 +106,13 @@ class RagSystemRAGService(RAGServiceInterface):
         dept_dir = os.path.abspath(_department_dir(department_id))
 
         try:
-            from rag_system.rag_pipeline import load_index, retrieve, rerank, generate_answer
+            from rag_system.rag_pipeline import query_rag
 
             def _run_query() -> str:
-                index, metadata_list = load_index()
-
-                # Retrieve top chunks globally, bypassing department isolation per user request.
-                from rag_system.config import TOP_K_RETRIEVAL
-                candidates = retrieve(index, metadata_list, query, top_k=TOP_K_RETRIEVAL)
-                
-                if not candidates:
-                    return "No context found to answer the query."
-
-                top_chunks = rerank(query, candidates, top_k=12)
-                answer, _citations = generate_answer(query, top_chunks)
+                # `context` is conversation history sourced from SQLite by the chat router;
+                # Gemini only needs the last 6 messages to stay within token limits.
+                conversation_history = (context[-6:] if context else None)
+                answer, _citations = query_rag(query, conversation_history=conversation_history)
                 return answer
 
             return await asyncio.to_thread(_run_query)

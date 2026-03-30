@@ -5,7 +5,10 @@ FastAPI backend for department-specific knowledge assistant
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import departments, chat, upload, conversations
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.services.rag_service import rag_service  # Initialize RAG service
@@ -23,6 +26,9 @@ logger = logging.getLogger(__name__)
 logging.getLogger("app.services.rag_service").setLevel(logging.DEBUG)
 logging.getLogger("app.routers").setLevel(logging.DEBUG)
 
+# Rate limiter (shared across routers)
+limiter = Limiter(key_func=get_remote_address)
+
 # Log startup information
 logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}")
 logger.debug(f"GEMINI_API_KEY configured: {bool(settings.GEMINI_API_KEY)}")
@@ -36,6 +42,11 @@ app = FastAPI(
     description="Department-specific knowledge assistant for UBL",
     version="1.0.0"
 )
+
+# slowapi integration
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # CORS middleware
 app.add_middleware(
@@ -59,6 +70,7 @@ async def startup_event():
     logger.info("=" * 60)
 
 # Include routers
+from app.routers import departments, chat, upload, conversations
 app.include_router(departments.router, prefix="/api/departments", tags=["departments"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(upload.router, prefix="/api/upload", tags=["upload"])

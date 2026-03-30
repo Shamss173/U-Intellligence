@@ -6,10 +6,11 @@ import logging
 import hashlib
 import json
 import os
-import pickle
 import re
 import time
 from pathlib import Path
+import sqlite3
+import threading
 
 import faiss
 import numpy as np
@@ -27,7 +28,6 @@ try:
         SERVICE_ACCOUNT_PATH,
         GENERATION_MODEL,
         EMBEDDING_MODEL,
-        METADATA_PATH,
         MIN_CHUNK_LENGTH,
         RERANKER_MODEL,
         SUPPORTED_EXTENSIONS,
@@ -47,7 +47,6 @@ except ImportError:
     SERVICE_ACCOUNT_PATH,
     GENERATION_MODEL,
     EMBEDDING_MODEL,
-    METADATA_PATH,
     MIN_CHUNK_LENGTH,
     RERANKER_MODEL,
     SUPPORTED_EXTENSIONS,
@@ -61,6 +60,113 @@ logger = logging.getLogger(__name__)
 # Keep it next to the index files so callers don't depend on CWD.
 INGESTION_STATE_PATH = str(Path(FAISS_INDEX_PATH).with_name("ingestion_state.json"))
 INGESTION_STATE_VERSION = 1
+
+# Ensure FAISS operations are thread-safe.
+_faiss_lock = threading.RLock()
+
+# Persist chunk-level metadata in SQLite instead of pickle.
+METADATA_DB_PATH = str(Path(FAISS_INDEX_PATH).with_name("metadata.db"))
+
+
+def _metadata_db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            chunk_id INTEGER PRIMARY KEY,
+            text TEXT,
+            source_file TEXT,
+            folder_path TEXT,
+            department_id TEXT,
+            page_number INTEGER,
+            file_type TEXT,
+            source_path TEXT,
+            relative_path TEXT
+        )
+        """
+    )
+    return conn
+
+
+def _reset_chunks_table(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM chunks")
+
+
+def _insert_chunks_metadata_batch(conn: sqlite3.Connection, metadata_rows: list[dict]) -> None:
+    """
+    Insert chunk metadata rows.
+
+    metadata_rows dict keys follow the historical pickle format, i.e. they include:
+    - 'text' (chunk text)
+    - 'chunk_id', 'source_file', 'folder_path', 'file_type', 'source_path', 'relative_path'
+    - optional 'page_number'
+    - optional 'department_id'
+    """
+    sql = """
+        INSERT OR REPLACE INTO chunks (
+            chunk_id,
+            text,
+            source_file,
+            folder_path,
+            department_id,
+            page_number,
+            file_type,
+            source_path,
+            relative_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = []
+    for m in metadata_rows:
+        # Keep nullability permissive so older metadata dict shapes still work.
+        chunk_id = int(m.get("chunk_id"))
+        params.append(
+            (
+                chunk_id,
+                m.get("text", ""),
+                m.get("source_file", ""),
+                m.get("folder_path", ""),
+                m.get("department_id"),  # may be absent
+                m.get("page_number"),  # may be absent
+                m.get("file_type", ""),
+                m.get("source_path", ""),
+                m.get("relative_path", ""),
+            )
+        )
+
+    if params:
+        conn.executemany(sql, params)
+
+
+def _load_metadata_list_from_db() -> list[dict]:
+    with _metadata_db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT chunk_id, text, source_file, folder_path, department_id, page_number, file_type,
+                   source_path, relative_path
+            FROM chunks
+            ORDER BY chunk_id ASC
+            """
+        ).fetchall()
+
+    metadata_list: list[dict] = []
+    for r in rows:
+        meta: dict = {
+            "chunk_id": int(r["chunk_id"]),
+            "text": r["text"] or "",
+            "source_file": r["source_file"] or "",
+            "folder_path": r["folder_path"] or "",
+            "file_type": r["file_type"] or "",
+            "source_path": r["source_path"] or "",
+            "relative_path": r["relative_path"] or "",
+        }
+        # Preserve historical pickle dict keys: omit fields when NULL so downstream sees identical shapes.
+        if r["department_id"] is not None:
+            meta["department_id"] = r["department_id"]
+        if r["page_number"] is not None:
+            meta["page_number"] = int(r["page_number"])
+        metadata_list.append(meta)
+    return metadata_list
 
 # ---------------------------------------------------------------------------
 # NLTK: ensure punkt is available for sentence tokenization
@@ -467,14 +573,16 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> np.n
     import urllib.request
     from urllib.error import HTTPError
     credentials = _get_vertex_credentials()
-    if not credentials.valid:
-        import google.auth.transport.requests
-        credentials.refresh(google.auth.transport.requests.Request())
 
     all_embeddings = []
     max_retries = 5
     base_backoff = 5  # seconds
     for i in range(0, len(texts), BATCH_SIZE):
+        # Refresh token as needed right before each batch request.
+        if not credentials.valid:
+            import google.auth.transport.requests
+            credentials.refresh(google.auth.transport.requests.Request())
+
         batch = texts[i: i + BATCH_SIZE]
         instances = [{"content": t, "task_type": task_type} for t in batch]
         body = _json.dumps({"instances": instances}).encode("utf-8")
@@ -534,7 +642,7 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> np.n
 def build_index(folder_paths: list[str]) -> None:
     """
     Ingest folders -> chunk -> embed -> build or update FAISS index (IndexFlatIP with
-    L2-normalized vectors). Saves index to FAISS_INDEX_PATH and metadata list to METADATA_PATH.
+    L2-normalized vectors). Saves index to FAISS_INDEX_PATH and chunk metadata to metadata.db.
 
     Robust de-duplication across repeated ingests:
     - Unchanged files are skipped (based on SHA-256 fingerprint).
@@ -579,7 +687,7 @@ def build_index(folder_paths: list[str]) -> None:
             if prev_path not in current_fingerprints:
                 removed_prev_files.append(prev_path)
 
-    index_exists = os.path.isfile(FAISS_INDEX_PATH) and os.path.isfile(METADATA_PATH)
+    index_exists = os.path.isfile(FAISS_INDEX_PATH) and os.path.isfile(METADATA_DB_PATH)
 
     # If we have no previous state or no index on disk, do a full rebuild
     if not state_files or not index_exists:
@@ -604,15 +712,20 @@ def build_index(folder_paths: list[str]) -> None:
             )
         index = faiss.IndexFlatIP(actual_dim)
         faiss.normalize_L2(embeddings)
-        index.add(embeddings)
+        with _faiss_lock:
+            index.add(embeddings)
 
-        metadata_list = [c["metadata"] for c in chunks]
-        for i, c in enumerate(chunks):
-            metadata_list[i] = {**metadata_list[i], "text": c["text"]}
+        metadata_rows = []
+        for c in chunks:
+            m = dict(c["metadata"])
+            m["text"] = c["text"]
+            metadata_rows.append(m)
 
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        with open(METADATA_PATH, "wb") as f:
-            pickle.dump(metadata_list, f)
+        with _faiss_lock:
+            faiss.write_index(index, FAISS_INDEX_PATH)
+        with _metadata_db_connect() as conn:
+            _reset_chunks_table(conn)
+            _insert_chunks_metadata_batch(conn, metadata_rows)
 
         state = {
             "version": INGESTION_STATE_VERSION,
@@ -622,7 +735,12 @@ def build_index(folder_paths: list[str]) -> None:
         }
         _save_ingestion_state(state)
 
-        logger.info("FAISS index saved: %s (%d vectors), metadata: %s", FAISS_INDEX_PATH, index.ntotal, METADATA_PATH)
+        logger.info(
+            "FAISS index saved: %s (%d vectors), metadata: %s",
+            FAISS_INDEX_PATH,
+            index.ntotal,
+            METADATA_DB_PATH,
+        )
         return
 
     # If any previously indexed file was deleted, rebuild to drop stale vectors.
@@ -651,15 +769,20 @@ def build_index(folder_paths: list[str]) -> None:
             )
         index = faiss.IndexFlatIP(actual_dim)
         faiss.normalize_L2(embeddings)
-        index.add(embeddings)
+        with _faiss_lock:
+            index.add(embeddings)
 
-        metadata_list = [c["metadata"] for c in chunks]
-        for i, c in enumerate(chunks):
-            metadata_list[i] = {**metadata_list[i], "text": c["text"]}
+        metadata_rows = []
+        for c in chunks:
+            m = dict(c["metadata"])
+            m["text"] = c["text"]
+            metadata_rows.append(m)
 
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        with open(METADATA_PATH, "wb") as f:
-            pickle.dump(metadata_list, f)
+        with _faiss_lock:
+            faiss.write_index(index, FAISS_INDEX_PATH)
+        with _metadata_db_connect() as conn:
+            _reset_chunks_table(conn)
+            _insert_chunks_metadata_batch(conn, metadata_rows)
 
         state = {
             "version": INGESTION_STATE_VERSION,
@@ -703,15 +826,20 @@ def build_index(folder_paths: list[str]) -> None:
             )
         index = faiss.IndexFlatIP(actual_dim)
         faiss.normalize_L2(embeddings)
-        index.add(embeddings)
+        with _faiss_lock:
+            index.add(embeddings)
 
-        metadata_list = [c["metadata"] for c in chunks]
-        for i, c in enumerate(chunks):
-            metadata_list[i] = {**metadata_list[i], "text": c["text"]}
+        metadata_rows = []
+        for c in chunks:
+            m = dict(c["metadata"])
+            m["text"] = c["text"]
+            metadata_rows.append(m)
 
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        with open(METADATA_PATH, "wb") as f:
-            pickle.dump(metadata_list, f)
+        with _faiss_lock:
+            faiss.write_index(index, FAISS_INDEX_PATH)
+        with _metadata_db_connect() as conn:
+            _reset_chunks_table(conn)
+            _insert_chunks_metadata_batch(conn, metadata_rows)
 
         state_files.update(current_fingerprints)
         state = {
@@ -728,16 +856,12 @@ def build_index(folder_paths: list[str]) -> None:
     # Append only NEW files (unchanged files are skipped)
     logger.info("Appending %d new file(s); skipping %d unchanged file(s).", len(new_files), len(unchanged_files))
 
-    # Load existing index + metadata
-    index = faiss.read_index(FAISS_INDEX_PATH)
-    with open(METADATA_PATH, "rb") as f:
-        metadata_list = pickle.load(f)
-
-    max_chunk_id = -1
-    if isinstance(metadata_list, list) and metadata_list:
-        for m in metadata_list:
-            if isinstance(m, dict):
-                max_chunk_id = max(max_chunk_id, int(m.get("chunk_id", -1)))
+    # Load existing index (metadata comes from SQLite)
+    with _faiss_lock:
+        index = faiss.read_index(FAISS_INDEX_PATH)
+    with _metadata_db_connect() as conn:
+        max_chunk_id_row = conn.execute("SELECT COALESCE(MAX(chunk_id), -1) AS max_id FROM chunks").fetchone()
+        max_chunk_id = int(max_chunk_id_row["max_id"]) if max_chunk_id_row else -1
     next_chunk_id = max_chunk_id + 1
 
     new_chunks = ingest_files(new_files, starting_chunk_id=next_chunk_id)
@@ -775,13 +899,18 @@ def build_index(folder_paths: list[str]) -> None:
         actual_dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(actual_dim)
         faiss.normalize_L2(embeddings)
-        index.add(embeddings)
-        metadata_list = [c["metadata"] for c in chunks]
-        for i, c in enumerate(chunks):
-            metadata_list[i] = {**metadata_list[i], "text": c["text"]}
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        with open(METADATA_PATH, "wb") as f:
-            pickle.dump(metadata_list, f)
+        with _faiss_lock:
+            index.add(embeddings)
+        metadata_rows = []
+        for c in chunks:
+            m = dict(c["metadata"])
+            m["text"] = c["text"]
+            metadata_rows.append(m)
+        with _faiss_lock:
+            faiss.write_index(index, FAISS_INDEX_PATH)
+        with _metadata_db_connect() as conn:
+            _reset_chunks_table(conn)
+            _insert_chunks_metadata_batch(conn, metadata_rows)
         state_files.update(current_fingerprints)
         state = {
             "version": INGESTION_STATE_VERSION,
@@ -794,14 +923,19 @@ def build_index(folder_paths: list[str]) -> None:
         return
 
     faiss.normalize_L2(embeddings)
-    index.add(embeddings)
+    with _faiss_lock:
+        index.add(embeddings)
 
+    metadata_rows = []
     for c in new_chunks:
-        metadata_list.append({**c["metadata"], "text": c["text"]})
+        m = dict(c["metadata"])
+        m["text"] = c["text"]
+        metadata_rows.append(m)
 
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    with open(METADATA_PATH, "wb") as f:
-        pickle.dump(metadata_list, f)
+    with _faiss_lock:
+        faiss.write_index(index, FAISS_INDEX_PATH)
+    with _metadata_db_connect() as conn:
+        _insert_chunks_metadata_batch(conn, metadata_rows)
 
     for p, fp in current_fingerprints.items():
         state_files[p] = fp
@@ -813,7 +947,12 @@ def build_index(folder_paths: list[str]) -> None:
     }
     _save_ingestion_state(state)
 
-    logger.info("FAISS index updated: %s (+%d vectors), metadata: %s", FAISS_INDEX_PATH, len(new_chunks), METADATA_PATH)
+    logger.info(
+        "FAISS index updated: %s (+%d vectors), metadata: %s",
+        FAISS_INDEX_PATH,
+        len(new_chunks),
+        METADATA_DB_PATH,
+    )
 
 
 def load_index() -> tuple[faiss.Index, list[dict]]:
@@ -822,9 +961,13 @@ def load_index() -> tuple[faiss.Index, list[dict]]:
     """
     if not os.path.isfile(FAISS_INDEX_PATH):
         raise FileNotFoundError(f"Index not found at {FAISS_INDEX_PATH}. Please run --ingest first.")
-    index = faiss.read_index(FAISS_INDEX_PATH)
-    with open(METADATA_PATH, "rb") as f:
-        metadata_list = pickle.load(f)
+    with _faiss_lock:
+        index = faiss.read_index(FAISS_INDEX_PATH)
+    if not os.path.isfile(METADATA_DB_PATH):
+        raise FileNotFoundError(
+            f"Metadata DB not found at {METADATA_DB_PATH}. Please run --ingest first."
+        )
+    metadata_list = _load_metadata_list_from_db()
     logger.info("Loaded index with %d vectors", index.ntotal)
     return index, metadata_list
 
@@ -840,7 +983,8 @@ def retrieve(index: faiss.Index, metadata_list: list[dict], query: str, top_k: i
     query_emb = np.ascontiguousarray(query_emb.astype(np.float32))
     faiss.normalize_L2(query_emb)
 
-    scores, indices = index.search(query_emb, min(top_k, index.ntotal))
+    with _faiss_lock:
+        scores, indices = index.search(query_emb, min(top_k, index.ntotal))
     candidates = []
     for j, idx in enumerate(indices[0]):
         if idx < 0:
@@ -908,7 +1052,11 @@ def rerank(query: str, candidates: list[dict], top_k: int = TOP_K_RERANK) -> lis
 # ---------------------------------------------------------------------------
 # Generation (Vertex AI)
 # ---------------------------------------------------------------------------
-def generate_answer(query: str, context_chunks: list[dict]) -> tuple[str, list[dict]]:
+def generate_answer(
+    query: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] = None,
+) -> tuple[str, list[dict]]:
     """
     Build context from chunks, call Gemini via Vertex AI REST API,
     return (answer_text, list of source citations).
@@ -956,9 +1104,21 @@ Answer:"""
             "page_number": meta.get("page_number"),
         })
 
-    body = _json.dumps({
-        "contents": [{"role": "user", "parts": [{"text": system_prompt}]}]
-    }).encode("utf-8")
+    # Prepend last 6 conversation messages (if any) before the final user message.
+    # Gemini uses `model` for assistant turns.
+    contents = []
+    if conversation_history:
+        last_messages = conversation_history[-6:]
+        for msg in last_messages:
+            role = msg.get("role")
+            gemini_role = "user" if role == "user" else "model"
+            contents.append(
+                {"role": gemini_role, "parts": [{"text": msg.get("content", "")}]}
+            )
+
+    contents.append({"role": "user", "parts": [{"text": system_prompt}]})
+
+    body = _json.dumps({"contents": contents}).encode("utf-8")
     url = (
         f"https://{GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/{GCP_PROJECT_ID}"
         f"/locations/{GCP_LOCATION}/publishers/google/models/{GENERATION_MODEL}:generateContent"
@@ -998,14 +1158,56 @@ def _sort_chunks_by_document_order(chunks: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Full RAG query pipeline
 # ---------------------------------------------------------------------------
-def query_rag(question: str) -> tuple[str, list[dict]]:
+def query_rag(question: str, conversation_history: list[dict] = None) -> tuple[str, list[dict]]:
     """
     Load index -> embed query -> retrieve top TOP_K_RETRIEVAL -> rerank to TOP_K_RERANK
     -> sort by document order -> generate with Gemini. Returns (answer, citations).
     """
     index, metadata_list = load_index()
     candidates = retrieve(index, metadata_list, question, top_k=TOP_K_RETRIEVAL)
+    if not candidates:
+        return "No context found to answer the query.", []
+    if candidates:
+        # BM25 hybrid scoring over the retrieved FAISS candidate set only.
+        from rank_bm25 import BM25Okapi
+
+        def _normalize_0_1(values: list[float]) -> list[float]:
+            if not values:
+                return []
+            vmin = float(min(values))
+            vmax = float(max(values))
+            if vmax == vmin:
+                return [0.0 for _ in values]
+            return [(float(v) - vmin) / (vmax - vmin) for v in values]
+
+        faiss_scores = [float(c.get("score", 0.0)) for c in candidates]
+        bm25_corpus_tokens = [_tokenize(c.get("text", "")) for c in candidates]
+        bm25 = BM25Okapi(bm25_corpus_tokens)
+        bm25_scores = bm25.get_scores(_tokenize(question))
+
+        faiss_norm = _normalize_0_1(faiss_scores)
+        bm25_norm = _normalize_0_1([float(s) for s in bm25_scores])
+
+        for i, c in enumerate(candidates):
+            final_score = 0.6 * faiss_norm[i] + 0.4 * bm25_norm[i]
+            c["final_score"] = final_score
+
+        logger.info(
+            "Hybrid scoring top candidates (faiss_norm, bm25_norm, final): %s",
+            [
+                (
+                    round(faiss_norm[i], 4),
+                    round(bm25_norm[i], 4),
+                    round(0.6 * faiss_norm[i] + 0.4 * bm25_norm[i], 4),
+                )
+                for i in range(min(5, len(candidates)))
+            ],
+        )
+
+        # Re-sort candidates so downstream selection/order reflects hybrid scoring.
+        candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+
     top_chunks = rerank(question, candidates, top_k=TOP_K_RERANK)
     top_chunks = _sort_chunks_by_document_order(top_chunks)
-    answer, citations = generate_answer(question, top_chunks)
+    answer, citations = generate_answer(question, top_chunks, conversation_history=conversation_history)
     return answer, citations
