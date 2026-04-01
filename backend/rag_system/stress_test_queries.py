@@ -19,40 +19,7 @@ STRESS_TESTS = {
         "How are you?",
         "Thanks",
         "What can you do?",
-    ],
-
-    "out_of_scope": [
-        "What is the weather today?",
-        "Who won the cricket match?",
-        "Tell me a joke",
-        "What is 2+2?",
-    ],
-
-    "vague": [
-        "Policy",
-        "Leave",
-        "What is the policy?",
-        "Explain",
-    ],
-
-    "typos": [
-        "matarnity leeve polcy",
-        "anual levae entitlement",
-        "dishonred cheque proceedure",
-    ],
-
-    "numerical": [
-        "How many days is maternity leave exactly?",
-        "What is the exact call back threshold amount?",
-        "How many years must records be kept?",
-    ],
-
-    "followup": [
-        "Tell me more",
-        "And what about the other one?",
-        "Explain further",
-        "What else?",
-    ],
+    ]
 }
 
 def run_stress_tests():

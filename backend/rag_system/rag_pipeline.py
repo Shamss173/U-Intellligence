@@ -936,7 +936,9 @@ def retrieve(
         if not text or meta.get("source_file") == "DELETED":
             continue
         score = float(scores[0][j])
-        candidates.append({"text": text, "metadata": {k: v for k, v in meta.items() if k != "text"}, "score": score})
+        MIN_RELEVANCE_SCORE = 0.55
+        if score >= MIN_RELEVANCE_SCORE:
+            candidates.append({"text": text, "metadata": {k: v for k, v in meta.items() if k != "text"}, "score": score})
         if len(candidates) >= top_k:
             break
     logger.info("Retrieved %d candidates (scores: %s)", len(candidates), [round(c["score"], 4) for c in candidates[:5]])
@@ -1008,6 +1010,78 @@ def generate_answer(
     return (answer_text, list of source citations).
     Avoids importing google.genai.types (which crashes on Python 3.14 via PIL).
     """
+    # ── Detect conversational/irrelevant queries ──────────────
+    CONVERSATIONAL_TRIGGERS = [
+        "how are you", "good morning", "good afternoon",
+        "good evening", "good night", "what's up",
+        "weather", "temperature", "forecast",
+        "how do you feel", "are you okay",
+        "hello", "hi", "hey", "hiya", "helo", "hii",
+        "thanks", "thank you", "thankyou", "thx", "thank",
+        "bye", "goodbye", "see you",
+        "ok", "okay", "yes", "no", "sure", "alright",
+        "great", "nice", "cool", "wow", "hmm", "good"
+    ]
+    
+    GREETING_RESPONSES_GEN = {
+        "hello":      "Hello! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hi":         "Hi! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hey":        "Hey! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hiya":       "Hi there! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "how are you?":"I am here and ready to help! I am "
+                      "U-Intelligence, UBL's document assistant. "
+                      "What would you like to know from the "
+                      "department documents?",
+        "thanks":     "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thanks!":     "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thank you":  "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thankyou":   "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thx":        "You're welcome! Feel free to ask anything.",
+        "thank":      "You're welcome! Feel free to ask anything.",
+        "bye":        "Goodbye! Feel free to return whenever you "
+                      "need help with UBL documents.",
+        "goodbye":    "Goodbye! Feel free to return whenever you "
+                      "need help with UBL documents.",
+        "see you":    "See you! Come back anytime you need help "
+                      "with UBL documents.",
+        "ok":         "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "okay":       "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "default":    "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?"
+    }
+
+    query_lower_gen = query.strip().lower()
+    first_word_gen = (
+        query_lower_gen.split()[0] 
+        if query_lower_gen.strip() else ""
+    )
+    
+    is_conversational = any(
+        trigger in query_lower_gen 
+        for trigger in CONVERSATIONAL_TRIGGERS
+    )
+    
+    if is_conversational or not context_chunks:
+        response = GREETING_RESPONSES_GEN.get(
+            query_lower_gen,
+            GREETING_RESPONSES_GEN.get(
+                first_word_gen,
+                GREETING_RESPONSES_GEN["default"]
+            )
+        )
+        return (response, [])
+    # ── Continue with normal generation ───────────────────────
+    
     import json as _json
     import urllib.request
 
@@ -1135,8 +1209,80 @@ def query_rag(
         top_k=TOP_K_RETRIEVAL,
         department_filter=department_filter,
     )
-    if not candidates:
-        return "No context found to answer the query.", []
+    
+    # ── Greeting detection ────────────────────────────────────
+    GREETINGS = {
+        "hello", "hi", "hey", "hiya", "helo", "hii",
+        "thanks", "thank you", "thankyou", "thx", "thank",
+        "bye", "goodbye", "see you", "ok", "okay",
+        "yes", "no", "sure", "alright", "great",
+        "good", "nice", "cool", "wow", "hmm"
+    }
+
+    GREETING_RESPONSES = {
+        "hello":      "Hello! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hi":         "Hi! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hey":        "Hey! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "hiya":       "Hi there! I am U-Intelligence, UBL's document "
+                      "assistant. How can I help you today?",
+        "how are you":"I am here and ready to help! I am "
+                      "U-Intelligence, UBL's document assistant. "
+                      "What would you like to know from the "
+                      "department documents?",
+        "thanks":     "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thank you":  "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thankyou":   "You're welcome! Let me know if you need "
+                      "anything else from the documents.",
+        "thx":        "You're welcome! Feel free to ask anything.",
+        "thank":      "You're welcome! Feel free to ask anything.",
+        "bye":        "Goodbye! Feel free to return whenever you "
+                      "need help with UBL documents.",
+        "goodbye":    "Goodbye! Feel free to return whenever you "
+                      "need help with UBL documents.",
+        "see you":    "See you! Come back anytime you need help "
+                      "with UBL documents.",
+        "ok":         "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "okay":       "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "sure":       "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "alright":    "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?",
+        "default":    "I am U-Intelligence, a document assistant "
+                      "for UBL. How can I help you?"
+    }
+
+    question_lower = question.strip().lower()
+    first_word = question_lower.split()[0] if question_lower.strip() else ""
+
+    is_greeting = (
+        question_lower in GREETINGS or
+        first_word in GREETINGS
+    )
+
+    if len(candidates) < 3:
+        if is_greeting:
+            response = GREETING_RESPONSES.get(
+                question_lower,
+                GREETING_RESPONSES.get(
+                    first_word,
+                    GREETING_RESPONSES["default"]
+                )
+            )
+            return (response, [])
+        return (
+            "I don't have enough information in the provided "
+            "documents to answer this.",
+            []
+        )
+    # ── End greeting detection ────────────────────────────────
+
     if candidates:
         # BM25 hybrid scoring over the retrieved FAISS candidate set only.
         from rank_bm25 import BM25Okapi
