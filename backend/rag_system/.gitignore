@@ -29,7 +29,7 @@ bank_rag.index
 chunks_metadata.pkl
 ingestion_state.json
 run_commands.txt
-
+metadata.db
 # Vector DB / embeddings / local databases (do not commit)
 database/
 databases/

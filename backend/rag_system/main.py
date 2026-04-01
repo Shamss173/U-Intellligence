@@ -43,13 +43,21 @@ def run_ingest(folder_paths: list[str]) -> None:
         logger.info("Index saved successfully. Index file size: %.2f MB", size_mb)
 
 
-def run_query(question: str) -> None:
+def run_query(question: str, dept: str = None) -> None:
     """Load index, run RAG pipeline, print answer and citations."""
     if not question or not question.strip():
         logger.error("Empty query.")
         sys.exit(1)
+        
+    if dept:
+        print(f"\n🏢 Department: {dept}")
+    else:
+        print(f"\n🌐 No department filter — searching all documents")
+
+    print(f"❓ Query: {question}\n")
+        
     try:
-        answer, citations = query_rag(question.strip())
+        answer, citations = query_rag(question.strip(), department_filter=dept)
     except FileNotFoundError as e:
         print("Index not found. Please run --ingest first.", file=sys.stderr)
         logger.warning("%s", e)
@@ -89,12 +97,19 @@ def main() -> None:
         metavar="QUESTION",
         help="Ask a question (requires existing index from --ingest).",
     )
+    parser.add_argument(
+        "--dept",
+        type=str,
+        required=False,
+        default=None,
+        help="Department code e.g. hrg, finance, it, operations_transformation"
+    )
     args = parser.parse_args()
 
     if args.ingest is not None:
         run_ingest(args.ingest)
     else:
-        run_query(args.query)
+        run_query(args.query, args.dept)
 
 
 if __name__ == "__main__":

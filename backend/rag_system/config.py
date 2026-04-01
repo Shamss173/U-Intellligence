@@ -21,11 +21,11 @@ SERVICE_ACCOUNT_PATH = str(RAG_SYSTEM_DIR / "service_account.json")
 
 GENERATION_MODEL = "gemini-2.5-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 3072
 
 # Chunking (sentence-based); larger chunks reduce mid-list splits in handbooks/policies
 CHUNK_SIZE = 50  # sentences per chunk
-CHUNK_OVERLAP = 5  # sentence overlap between chunks
+CHUNK_OVERLAP = 3  # sentence overlap between chunks
 
 # Retrieval and re-ranking
 TOP_K_RETRIEVAL = 30  # FAISS candidates before re-ranking
@@ -36,7 +36,7 @@ FAISS_INDEX_PATH = str(RAG_SYSTEM_DIR / "bank_rag.index")
 METADATA_PATH = str(RAG_SYSTEM_DIR / "chunks_metadata.pkl")
 
 # Embedding batching
-BATCH_SIZE = 100  # embedding batch size
+BATCH_SIZE = 250  # embedding batch size
 
 # Re-ranker model
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"

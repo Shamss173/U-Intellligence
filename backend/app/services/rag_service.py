@@ -112,7 +112,11 @@ class RagSystemRAGService(RAGServiceInterface):
                 # `context` is conversation history sourced from SQLite by the chat router;
                 # Gemini only needs the last 6 messages to stay within token limits.
                 conversation_history = (context[-6:] if context else None)
-                answer, _citations = query_rag(query, conversation_history=conversation_history)
+                answer, _citations = query_rag(
+                    query,
+                    conversation_history=conversation_history,
+                    department_filter=department_id,
+                )
                 return answer
 
             return await asyncio.to_thread(_run_query)
